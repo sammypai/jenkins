@@ -1,0 +1,116 @@
+def accounts = [
+  "324973899391": "admin-role-sa",
+  "867436948156": "admin-role-sa-nonprd",
+  "913893776687": "admin-role-sa-prd"
+]
+currentBuild.displayName = "${params.tfEnvironment}-${params.tfAction}-${params.tfComponent}-#"+currentBuild.number
+pipeline {
+  agent {
+    kubernetes {
+        defaultContainer 'jnlp'
+        yaml """
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          labels:
+            jenkinsjob: terraform
+        spec:
+          serviceAccountName: "${accounts[params.tfTargetAccountID]}"
+          initContainers:
+          - name: python
+            image: 324973899391.dkr.ecr.eu-west-1.amazonaws.com/python-boto:3.0
+            tty: true
+            resources:
+              requests:
+                cpu: "50m"
+                memory: "100Mi"
+              limits:
+                memory: "100Mi"
+            env:
+              - name: WORKSPACE
+                value: "/tmp/aws"
+            args:
+              - "python3"
+              - "/opt/assume_role_web_identity.py"
+            volumeMounts:
+            - name: tmpaws
+              mountPath: /tmp/aws
+          containers:
+          - name: terraform
+            image: 324973899391.dkr.ecr.eu-west-1.amazonaws.com/terraform:2.0
+            tty: true
+            resources:
+              requests:
+                cpu: "1000m"
+                memory: "3000Mi"
+              limits:
+                memory: "3000Mi"
+            volumeMounts:
+            - name: tmpaws
+              mountPath: /tmp/aws
+          volumes:
+            - name: tmpaws
+              emptyDir: {}
+        """
+    }
+  }
+  stages {
+    stage('Git repository checkout') {
+      steps {
+        container('terraform') {
+          dir('tfdir') {
+            sh "echo Workspace dir is ${pwd()}"
+            git branch: '$SOURCE_BRANCH', credentialsId: 'jenkins-github-key', url: 'git@github.com:KainosSoftwareLtd/tuh.terraform.git'
+          }
+        }
+      }
+    }
+    stage('Decrypt variables') {
+      steps {
+        container('terraform') {
+          withCredentials([sshUserPrivateKey(credentialsId: 'jenkins-gpg-key', keyFileVariable: 'GPG_KEY')]) {
+            dir('tfdir') {
+              sh "gpg --batch --import $GPG_KEY"
+              sh "git secret reveal -f"
+            }
+          }
+        }
+      }
+    }
+    stage('Run terraform action') {
+      steps {
+        container('terraform') {
+          dir('tfdir') {
+            ansiColor('xterm') {
+              sh """
+              set +x
+              . /tmp/aws/env_vars
+              set -x
+              if [ "${params.tfComponent}" = "application" ] || [ "${params.tfComponent}" = "iguana" ] || [ "${params.tfComponent}" = "eu1int_custom" ]; then
+                  bin/terraform.sh \
+                  -a "${params.tfAction}" \
+                  -g "${params.tfTargetAccount}" \
+                  -c "${params.tfComponent}" \
+                  -e "${params.tfEnvironment}" \
+                  -r eu-west-1 \
+                  -p tuh \
+                  -- -var "release_tag=${params.RELEASE_TAG}" \
+                  ${params.tfOptionalArguments}
+              else
+                  bin/terraform.sh \
+                  -a "${params.tfAction}" \
+                  -g "${params.tfTargetAccount}" \
+                  -c "${params.tfComponent}" \
+                  -e "${params.tfEnvironment}" \
+                  -r eu-west-1 \
+                  -p tuh \
+                  -- ${params.tfOptionalArguments}
+              fi
+              """
+            }
+          }
+        }
+      }
+    }
+  }
+}
