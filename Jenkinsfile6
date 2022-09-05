@@ -1,0 +1,68 @@
+def accounts = [
+  "324973899391": "admin-role-sa",
+  "867436948156": "admin-role-sa-nonprd",
+  "913893776687": "admin-role-sa-prd"
+]
+currentBuild.displayName = "${params.tfEnvironment}-${params.tfAction}-${params.tfComponent}-#"+currentBuild.number
+pipeline {
+  agent Linux
+  stages {
+    stage('Git repository checkout') {
+      steps {
+        container('terraform') {
+          dir('tfdir') {
+            sh "echo Workspace dir is ${pwd()}"
+            git branch: '$SOURCE_BRANCH', credentialsId: 'jenkins-github-key', url: 'git@github.com:KainosSoftwareLtd/tuh.terraform.git'
+          }
+        }
+      }
+    }
+    stage('Decrypt variables') {
+      steps {
+        container('terraform') {
+          withCredentials([sshUserPrivateKey(credentialsId: 'jenkins-gpg-key', keyFileVariable: 'GPG_KEY')]) {
+            dir('tfdir') {
+              sh "gpg --batch --import $GPG_KEY"
+              sh "git secret reveal -f"
+            }
+          }
+        }
+      }
+    }
+    stage('Run terraform action') {
+      steps {
+        container('terraform') {
+          dir('tfdir') {
+            ansiColor('xterm') {
+              sh """
+              set +x
+              . /tmp/aws/env_vars
+              set -x
+              if [ "${params.tfComponent}" = "application" ] || [ "${params.tfComponent}" = "iguana" ] || [ "${params.tfComponent}" = "eu1int_custom" ]; then
+                  bin/terraform.sh \
+                  -a "${params.tfAction}" \
+                  -g "${params.tfTargetAccount}" \
+                  -c "${params.tfComponent}" \
+                  -e "${params.tfEnvironment}" \
+                  -r eu-west-1 \
+                  -p tuh \
+                  -- -var "release_tag=${params.RELEASE_TAG}" \
+                  ${params.tfOptionalArguments}
+              else
+                  bin/terraform.sh \
+                  -a "${params.tfAction}" \
+                  -g "${params.tfTargetAccount}" \
+                  -c "${params.tfComponent}" \
+                  -e "${params.tfEnvironment}" \
+                  -r eu-west-1 \
+                  -p tuh \
+                  -- ${params.tfOptionalArguments}
+              fi
+              """
+            }
+          }
+        }
+      }
+    }
+  }
+}
